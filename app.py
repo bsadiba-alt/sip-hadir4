@@ -18,7 +18,7 @@ except ImportError:
 # 1. KONFIGURASI HALAMAN & CSS RESPONSIF MOBILE
 # ==========================================
 st.set_page_config(
-    page_title="SIP-HADIR 4", 
+    page_title="ABSENSI WIL.IV", 
     layout="wide", 
     page_icon="🔐",
     initial_sidebar_state="expanded"
@@ -174,7 +174,7 @@ if st.session_state['user'] is None:
             st.session_state['user'] = dict(auto_user)
 
 if st.session_state['user'] is None:
-    st.title("🏛️ SIP-HADIR 4")
+    st.title("🏛️ ABSENSI WIL.IV")
     st.caption("Sistem Presensi Biometrik - Cabang Dinas Wilayah 4")
     
     st.info("Log in menggunakan NIP sebagai Username & Password bawaan.")
@@ -194,7 +194,7 @@ if st.session_state['user'] is None:
     st.stop()
 
 user = st.session_state['user']
-st.sidebar.markdown("### 🏛️ SIP-HADIR 4")
+st.sidebar.markdown("### 🏛️ ABSENSI WIL.IV")
 st.sidebar.markdown(f"👤 **{user['name']}**")
 st.sidebar.caption(f"Hak Akses: **{user['role'].upper()}** | NIP: {user['nip']}")
 
