@@ -234,9 +234,9 @@ if st.sidebar.button("Keluar (Logout)"):
 # ==========================================
 
 # ------------------------------------------
-# A. PERAN ASN / GURU
+# A. PERAN ASN / GURU (DENGAN GPS OTOMATIS BROWSER)
 # ------------------------------------------
-if user['role'] == 'asn':
+elif user['role'] == 'asn':
     st.title("📌 Presensi Kehadiran ASN")
     
     conn = get_db()
@@ -261,22 +261,66 @@ if user['role'] == 'asn':
             else:
                 st.error(msg)
 
-    # ALUR 2: Presensi Harian
+    # ALUR 2: Presensi Harian (GPS Otomatis Browser)
     else:
-        st.success("✅ Wajah Terdaftar. Silakan pindai wajah & verifikasi lokasi.")
+        st.success("✅ Wajah Terdaftar. Aktifkan GPS smartphone Anda lalu lakukan verifikasi.")
         
-        col_cam, col_geo = st.columns([1, 1])
-        with col_geo:
-            st.markdown(f"**Unit Kerja:** {school['name']}")
-            st.markdown(f"**Target Koordinat:** `{school['target_lat']}, {school['target_lng']}`")
-            st.markdown(f"**Radius Toleransi:** `{school['radius_meters']} Meter`")
+        # Komponen HTML5/JS untuk Mengambil GPS Asli Perangkat
+        import streamlit.components.v1 as components
+        
+        st.markdown("#### 📍 Deteksi Lokasi Anda Saat Ini")
+        
+        # Ambil koordinat dari query params jika sudah terdeteksi JS
+        query_params = st.query_params
+        curr_lat = query_params.get("lat", None)
+        curr_lng = query_params.get("lng", None)
+        
+        if not curr_lat or not curr_lng:
+            st.info("🔄 Silakan izinkan akses lokasi (GPS) pada browser Anda...")
+            # Script JS untuk minta izin GPS & refresh URL dengan koordinat asli
+            gps_script = """
+            <script>
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    function(position) {
+                        const lat = position.coords.latitude;
+                        const lng = position.coords.longitude;
+                        const url = new URL(window.location.href);
+                        if (url.searchParams.get("lat") !== lat.toString() || url.searchParams.get("lng") !== lng.toString()) {
+                            url.searchParams.set("lat", lat);
+                            url.searchParams.set("lng", lng);
+                            window.parent.location.href = url.href;
+                        }
+                    },
+                    function(error) {
+                        alert("Gagal mengambil lokasi GPS. Pastikan GPS HP aktif & izin lokasi diberikan.");
+                    },
+                    { enableHighAccuracy: true }
+                );
+            } else {
+                alert("Browser Anda tidak mendukung Geolocation.");
+            }
+            </script>
+            """
+            components.html(gps_script, height=0)
+            st.warning("⚠️ Menunggu izin akses GPS dari browser. Jika tidak muncul, pastikan GPS HP aktif dan muat ulang halaman.")
+        else:
+            curr_lat = float(curr_lat)
+            curr_lng = float(curr_lng)
             
-            st.write("---")
-            st.write("📍 **Simulasi GPS Saat Ini:**")
-            curr_lat = st.number_input("Latitude", value=float(school['target_lat']), format="%.6f")
-            curr_lng = st.number_input("Longitude", value=float(school['target_lng']), format="%.6f")
+            # Hitung jarak otomatis
+            distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
+            is_in_radius = distance <= school['radius_meters']
+            
+            st.write(f"🏢 **Sekolah:** {school['name']}")
+            st.write(f"📏 **Jarak Anda dari Sekolah:** `{distance:.1f} Meter`")
+            
+            if is_in_radius:
+                st.success("✅ Anda berada dalam radius sekolah!")
+            else:
+                st.error(f"❌ Di luar radius! Maksimal jarak: {school['radius_meters']} Meter.")
 
-        with col_cam:
+            st.write("---")
             img_scan = st.camera_input("Pindai Wajah Presensi")
             if img_scan:
                 scan_encoding, msg = extract_face_features(img_scan)
@@ -284,13 +328,7 @@ if user['role'] == 'asn':
                     st.error(msg)
                 else:
                     saved_encoding = json.loads(db_user['face_encoding'])
-                    is_match, dist = match_faces(scan_encoding, saved_encoding)
-                    
-                    distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
-                    is_in_radius = distance <= school['radius_meters']
-
-                    st.write(f"🔍 Skor Kemiripan: `{dist:.4f}` ({'✅ Cocok' if is_match else '❌ Beda Wajah'})")
-                    st.write(f"📏 Jarak GPS: `{distance:.1f} m` ({'✅ Dalam Radius' if is_in_radius else '❌ Luar Radius'})")
+                    is_match, dist = match_faces(scan_encoding, saved_encoding, threshold=0.55)
 
                     if is_match and is_in_radius:
                         conn = get_db()
@@ -301,7 +339,10 @@ if user['role'] == 'asn':
                         st.balloons()
                         st.success("🎉 PRESENSI BERHASIL DICATAT!")
                     else:
-                        st.error("🚫 Presensi Ditolak: Wajah tidak cocok atau di luar radius sekolah!")
+                        if not is_match:
+                            st.error("🚫 Presensi Ditolak: Wajah tidak dikenali!")
+                        if not is_in_radius:
+                            st.error("🚫 Presensi Ditolak: Anda berada di luar area sekolah!")
 
 # ------------------------------------------
 # B. PERAN SEKOLAH (ADMIN SEKOLAH)
