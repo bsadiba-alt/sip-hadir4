@@ -4,6 +4,7 @@ import json
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 from datetime import datetime
 
@@ -20,7 +21,6 @@ st.set_page_config(
 # Injeksi CSS untuk optimasi layar smartphone (Android/iOS)
 st.markdown("""
     <style>
-    /* Penyesuaian margin container utama di smartphone */
     @media (max-width: 768px) {
         .main .block-container {
             padding-left: 0.8rem !important;
@@ -28,7 +28,6 @@ st.markdown("""
             padding-top: 1rem !important;
             padding-bottom: 2rem !important;
         }
-        /* Tombol full-width di HP agar mudah ditekan jari */
         .stButton > button, .stDownloadButton > button {
             width: 100% !important;
             border-radius: 8px !important;
@@ -36,17 +35,14 @@ st.markdown("""
             font-weight: bold !important;
             margin-bottom: 0.5rem !important;
         }
-        /* Ukuran font metric kartu informasi */
         [data-testid="stMetricValue"] {
             font-size: 1.4rem !important;
         }
-        /* Kamera Streamlit fit di layar HP */
         [data-testid="stCameraInput"] {
             width: 100% !important;
         }
     }
     
-    /* Desain UI Profesional */
     .stApp {
         background-color: #F8F9FA;
     }
@@ -85,7 +81,7 @@ def init_db():
         )
     ''')
     
-    # Tabel Pengguna (NIP sebagai Username & Password Bawaan)
+    # Tabel Pengguna
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             nip TEXT PRIMARY KEY,
@@ -112,7 +108,7 @@ def init_db():
         )
     ''')
     
-    # Data Awal (Default Seed Data)
+    # Seed Data Default
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO schools VALUES ('SCH-01', 'SMKN 1 Wilayah 4', -5.147665, 119.432732, 50.0)")
@@ -135,15 +131,11 @@ def calculate_haversine(lat1, lon1, lat2, lon2):
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 def extract_face_features(image_bytes):
-    """
-    Mengekstrak vektor fitur biometrik visual dari kamera.
-    Menggunakan PIL & NumPy yang 100% stabil di Python 3.14.
-    """
+    """Mengekstrak vektor fitur biometrik visual dari gambar"""
     try:
         image_bytes.seek(0)
-        img = Image.open(image_bytes).convert('L') # Grayscale
+        img = Image.open(image_bytes).convert('L')
         
-        # Crop area tengah gambar (fokus wajah)
         w, h = img.size
         cx, cy = w // 2, h // 2
         crop_size = min(w, h) // 2
@@ -156,7 +148,6 @@ def extract_face_features(image_bytes):
         face_cropped = img.crop((left, top, right, bottom))
         face_resized = face_cropped.resize((64, 64))
         
-        # Normalisasi vektor fitur numerik
         vector = np.array(face_resized, dtype=np.float32).flatten()
         norm = np.linalg.norm(vector)
         if norm > 0:
@@ -166,7 +157,7 @@ def extract_face_features(image_bytes):
     except Exception as e:
         return None, f"Gagal memproses gambar: {str(e)}"
 
-def match_faces(encoding1, encoding2, threshold=0.45):
+def match_faces(encoding1, encoding2, threshold=0.55):
     """Menghitung jarak Euclidean antara dua vektor wajah"""
     if encoding1 is None or encoding2 is None:
         return False, 999.0
@@ -234,9 +225,9 @@ if st.sidebar.button("Keluar (Logout)"):
 # ==========================================
 
 # ------------------------------------------
-# A. PERAN ASN / GURU (REVISI KAMERA & GPS STABIL)
+# A. PERAN ASN / GURU (GPS OTOMATIS & KAMERA STABIL)
 # ------------------------------------------
-elif user['role'] == 'asn':
+if user['role'] == 'asn':
     st.title("📌 Presensi Kehadiran ASN")
     
     conn = get_db()
@@ -261,17 +252,13 @@ elif user['role'] == 'asn':
             else:
                 st.error(msg)
 
-    # ALUR 2: Presensi Harian (GPS & Kamera Stabil)
+    # ALUR 2: Presensi Harian (GPS Otomatis Browser)
     else:
-        import streamlit.components.v1 as components
-        
-        # Baca Query Params untuk Koordinat GPS
         curr_lat = st.query_params.get("lat", None)
         curr_lng = st.query_params.get("lng", None)
         
-        # Script JS Geolocation yang Aman (Hanya update parameter jika belum ada)
         if not curr_lat or not curr_lng:
-            st.info("🔄 Mengambil lokasi GPS... Pastikan izin lokasi (GPS) diizinkan di browser HP Anda.")
+            st.info("🔄 Mengambil lokasi GPS... Pastikan izin lokasi (GPS) diizinkan pada browser HP Anda.")
             gps_script = """
             <script>
             if (navigator.geolocation) {
@@ -296,7 +283,6 @@ elif user['role'] == 'asn':
             """
             components.html(gps_script, height=0)
             
-            # Tombol Manual Refresh jika GPS lambat merespon di HP tertentu
             if st.button("🔄 Muat Ulang Koordinat GPS"):
                 st.rerun()
         else:
@@ -306,17 +292,15 @@ elif user['role'] == 'asn':
             distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
             is_in_radius = distance <= school['radius_meters']
             
-            # Tampilan Status GPS
             st.write(f"🏢 **Sekolah:** {school['name']}")
-            st.write(f"📏 **Jarak Anda:** `{distance:.1f} Meter` dari lokasi sekolah")
+            st.write(f"📏 **Jarak Anda:** `{distance:.1f} Meter` dari sekolah")
             
             if is_in_radius:
-                st.success("✅ Lokasi Valid: Anda berada di dalam area sekolah.")
+                st.success("✅ Lokasi Valid: Anda berada di area sekolah.")
             else:
                 st.error(f"❌ Lokasi Tidak Valid: Di luar radius ({school['radius_meters']} m).")
 
             st.write("---")
-            # Kamera diberi KEY khusus agar tidak ter-reset saat state berubah
             img_scan = st.camera_input("Pindai Wajah Presensi", key="cam_presensi")
             
             if img_scan:
@@ -340,6 +324,7 @@ elif user['role'] == 'asn':
                             st.error(f"🚫 Presensi Ditolak: Wajah tidak cocok! (Kemiripan: {dist:.2f})")
                         if not is_in_radius:
                             st.error("🚫 Presensi Ditolak: Anda berada di luar area sekolah!")
+
 # ------------------------------------------
 # B. PERAN SEKOLAH (ADMIN SEKOLAH)
 # ------------------------------------------
@@ -362,7 +347,7 @@ elif user['role'] == 'sekolah':
     conn.close()
 
     st.caption(f"Unit Kerja: **{school['name']}**")
-    tab1, tab2, tab3 = st.tabs(["📊 Laporan Kehadiran", "➕ Kelola Guru ASN", "⚙️ GPS Sekolah"])
+    tab1, tab2, tab3 = st.tabs(["📊 Laporan Kehadiran", "👥 Kelola Guru ASN", "⚙️ GPS Sekolah"])
     
     # TAB 1: LAPORAN
     with tab1:
@@ -401,21 +386,30 @@ elif user['role'] == 'sekolah':
             if teachers:
                 st.dataframe(pd.DataFrame([dict(t) for t in teachers]), use_container_width=True)
                 sel_nip = st.selectbox("Pilih NIP Guru", [t['NIP'] for t in teachers])
-                cr, cd = st.columns(2)
+                
+                cr, cd, cf = st.columns(3)
                 with cr:
-                    if st.button("Reset Password ke NIP"):
+                    if st.button("Reset Password"):
                         conn = get_db()
                         conn.execute("UPDATE users SET password = nip WHERE nip = ?", (sel_nip,))
                         conn.commit()
                         conn.close()
-                        st.success("Password di-reset!")
+                        st.success("Password di-reset ke NIP!")
                 with cd:
-                    if st.button("Hapus Data Guru"):
+                    if st.button("Hapus Guru"):
                         conn = get_db()
                         conn.execute("DELETE FROM users WHERE nip = ?", (sel_nip,))
                         conn.commit()
                         conn.close()
                         st.warning("Data guru dihapus!")
+                        st.rerun()
+                with cf:
+                    if st.button("🔄 Reset Wajah"):
+                        conn = get_db()
+                        conn.execute("UPDATE users SET face_encoding = NULL WHERE nip = ?", (sel_nip,))
+                        conn.commit()
+                        conn.close()
+                        st.success("Wajah di-reset!")
                         st.rerun()
 
     # TAB 3: PENGATURAN GPS
@@ -452,7 +446,6 @@ elif user['role'] == 'cabdin':
     users_all = conn.execute("SELECT u.nip as NIP, u.name as Nama, u.role as Peran, s.name as Sekolah FROM users u LEFT JOIN schools s ON u.school_id = s.id").fetchall()
     conn.close()
 
-    # Kartu Informasi Utama
     m1, m2, m3 = st.columns(3)
     m1.metric("Total ASN", f"{total_asn} Orang")
     m2.metric("Hadir Hari Ini", f"{total_hadir} Orang")
@@ -514,7 +507,7 @@ elif user['role'] == 'cabdin':
         st.write("#### Daftar Pengguna Sistem")
         st.dataframe(pd.DataFrame([dict(u) for u in users_all]), use_container_width=True)
 
-    # TAB 4: TAMBAH SEKOLAH
+    # TAB 4: TAMBAH SEKOLAH (DENGAN PENANGANAN ERROR DUPLIKASI)
     with tab_school:
         st.write("#### ➕ Tambah Sekolah Baru")
         s_id = st.text_input("ID Sekolah (misal: SCH-02)")
@@ -526,9 +519,26 @@ elif user['role'] == 'cabdin':
         if st.button("Simpan Sekolah Baru", type="primary"):
             if s_id and s_name:
                 conn = get_db()
-                conn.execute("INSERT INTO schools VALUES (?, ?, ?, ?, ?)", (s_id, s_name, s_lat, s_lng, s_rad))
-                conn.execute("INSERT INTO users VALUES (?, ?, ?, 'sekolah', ?, NULL)", (f"ADMIN-{s_id}", f"Admin {s_name}", f"ADMIN-{s_id}", s_id))
-                conn.commit()
-                conn.close()
-                st.success(f"Sekolah {s_name} berhasil ditambahkan!")
-                st.rerun()
+                
+                check_school = conn.execute("SELECT id FROM schools WHERE id = ?", (s_id,)).fetchone()
+                check_user = conn.execute("SELECT nip FROM users WHERE nip = ?", (f"ADMIN-{s_id}",)).fetchone()
+                
+                if check_school:
+                    st.error(f"⚠️ ID Sekolah '{s_id}' sudah digunakan! Gunakan ID lain (misal: SCH-02).")
+                    conn.close()
+                elif check_user:
+                    st.error(f"⚠️ User Admin 'ADMIN-{s_id}' sudah ada di sistem.")
+                    conn.close()
+                else:
+                    try:
+                        conn.execute("INSERT INTO schools VALUES (?, ?, ?, ?, ?)", (s_id, s_name, s_lat, s_lng, s_rad))
+                        conn.execute("INSERT INTO users VALUES (?, ?, ?, 'sekolah', ?, NULL)", (f"ADMIN-{s_id}", f"Admin {s_name}", f"ADMIN-{s_id}", s_id))
+                        conn.commit()
+                        st.success(f"Sekolah {s_name} berhasil ditambahkan!")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("⚠️ Gagal menyimpan: Terjadi bentrokan data di database.")
+                    finally:
+                        conn.close()
+            else:
+                st.warning("⚠️ ID Sekolah dan Nama Sekolah wajib diisi!")
