@@ -4,9 +4,9 @@ import json
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from PIL import Image
 from datetime import datetime
+from streamlit_js_eval import get_geolocation
 
 # ==========================================
 # 1. KONFIGURASI HALAMAN & CSS RESPONSIF MOBILE
@@ -204,7 +204,7 @@ if st.sidebar.button("Keluar (Logout)"):
 # ==========================================
 
 # ------------------------------------------
-# A. PERAN ASN / GURU (KAMERA FIX SELALU MUNCUL)
+# A. PERAN ASN / GURU (DENGAN STREAMLIT-JS-EVAL GPS)
 # ------------------------------------------
 if user['role'] == 'asn':
     st.title("📌 Presensi Kehadiran ASN")
@@ -231,47 +231,22 @@ if user['role'] == 'asn':
             else:
                 st.error(msg)
 
-    # ALUR 2: Presensi Harian (GPS & Kamera Berjalan Independen)
+    # ALUR 2: Presensi Harian (GPS Menggunakan streamlit-js-eval)
     else:
         st.subheader("📍 Lokasi & Verifikasi Presensi")
         
-        curr_lat = st.query_params.get("lat", None)
-        curr_lng = st.query_params.get("lng", None)
+        # Pengambilan Lokasi JS Direct
+        location = get_geolocation()
         
-        # Inisialisasi Status GPS
+        curr_lat = None
+        curr_lng = None
         is_in_radius = False
         distance = 0.0
-        
-        if not curr_lat or not curr_lng:
-            st.warning("🔄 Sedang mendeteksi lokasi GPS... Mohon izinkan lokasi pada browser HP Anda.")
-            gps_script = """
-            <script>
-            if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition(
-                    function(position) {
-                        const lat = position.coords.latitude;
-                        const lng = position.coords.longitude;
-                        const url = new URL(window.parent.location.href);
-                        if (!url.searchParams.get("lat")) {
-                            url.searchParams.set("lat", lat);
-                            url.searchParams.set("lng", lng);
-                            window.parent.location.replace(url.href);
-                        }
-                    },
-                    function(error) {
-                        console.log("GPS Error: " + error.message);
-                    },
-                    { enableHighAccuracy: true, timeout: 7000 }
-                );
-            }
-            </script>
-            """
-            components.html(gps_script, height=0)
-            if st.button("🔄 Ambil Ulang Koordinat GPS"):
-                st.rerun()
-        else:
-            curr_lat = float(curr_lat)
-            curr_lng = float(curr_lng)
+
+        if location and 'coords' in location:
+            curr_lat = location['coords']['latitude']
+            curr_lng = location['coords']['longitude']
+            
             distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
             is_in_radius = distance <= school['radius_meters']
             
@@ -282,15 +257,17 @@ if user['role'] == 'asn':
                 st.success("✅ Lokasi Valid: Anda berada di area sekolah.")
             else:
                 st.error(f"❌ Lokasi Tidak Valid: Di luar radius ({school['radius_meters']} m).")
+        else:
+            st.warning("🔄 Mengambil koordinat GPS... Pastikan lokasi (GPS) HP aktif dan berikan izin pada browser.")
 
         st.write("---")
         
-        # KAMERA DILETAKKAN DI LUAR IF/ELSE AGAR SELALU MUNCUL DI LAYAR
+        # Kamera Tetap Aktif
         img_scan = st.camera_input("Pindai Wajah Presensi", key="cam_presensi")
         
         if img_scan:
-            if not curr_lat or not curr_lng:
-                st.error("🚫 Gagal Presensi: Lokasi GPS belum terdeteksi! Aktifkan GPS HP Anda dan klik 'Ambil Ulang Koordinat GPS'.")
+            if curr_lat is None or curr_lng is None:
+                st.error("🚫 Presensi Ditolak: Lokasi GPS belum berhasil terdeteksi oleh perangkat!")
             else:
                 scan_encoding, msg = extract_face_features(img_scan)
                 if not scan_encoding:
