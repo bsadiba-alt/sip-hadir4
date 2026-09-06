@@ -18,7 +18,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Injeksi CSS untuk optimasi layar smartphone (Android/iOS)
 st.markdown("""
     <style>
     @media (max-width: 768px) {
@@ -42,10 +41,7 @@ st.markdown("""
             width: 100% !important;
         }
     }
-    
-    .stApp {
-        background-color: #F8F9FA;
-    }
+    .stApp { background-color: #F8F9FA; }
     div[data-testid="stMetric"] {
         background-color: #FFFFFF;
         padding: 15px;
@@ -69,8 +65,6 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
-    
-    # Tabel Sekolah
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS schools (
             id TEXT PRIMARY KEY,
@@ -80,8 +74,6 @@ def init_db():
             radius_meters REAL DEFAULT 50.0
         )
     ''')
-    
-    # Tabel Pengguna
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             nip TEXT PRIMARY KEY,
@@ -93,8 +85,6 @@ def init_db():
             FOREIGN KEY (school_id) REFERENCES schools (id)
         )
     ''')
-    
-    # Tabel Log Presensi
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,8 +97,6 @@ def init_db():
             FOREIGN KEY (nip) REFERENCES users (nip)
         )
     ''')
-    
-    # Seed Data Default
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO schools VALUES ('SCH-01', 'SMKN 1 Wilayah 4', -5.147665, 119.432732, 50.0)")
@@ -122,7 +110,6 @@ def init_db():
 # 3. LOGIKA BIOMETRIK WAJAH & GEO-TAGGING
 # ==========================================
 def calculate_haversine(lat1, lon1, lat2, lon2):
-    """Menghitung jarak dalam meter antara 2 koordinat GPS"""
     R = 6371000.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
@@ -131,11 +118,9 @@ def calculate_haversine(lat1, lon1, lat2, lon2):
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 def extract_face_features(image_bytes):
-    """Mengekstrak vektor fitur biometrik visual dari gambar"""
     try:
         image_bytes.seek(0)
         img = Image.open(image_bytes).convert('L')
-        
         w, h = img.size
         cx, cy = w // 2, h // 2
         crop_size = min(w, h) // 2
@@ -158,13 +143,10 @@ def extract_face_features(image_bytes):
         return None, f"Gagal memproses gambar: {str(e)}"
 
 def match_faces(encoding1, encoding2, threshold=0.55):
-    """Menghitung jarak Euclidean antara dua vektor wajah"""
     if encoding1 is None or encoding2 is None:
         return False, 999.0
-        
     v1 = np.array(encoding1, dtype=np.float32)
     v2 = np.array(encoding2, dtype=np.float32)
-    
     distance = float(np.linalg.norm(v1 - v2))
     return distance < threshold, distance
 
@@ -176,7 +158,6 @@ init_db()
 if 'user' not in st.session_state:
     st.session_state['user'] = None
 
-# ----- HALAMAN LOGIN -----
 if st.session_state['user'] is None:
     st.title("🏛️ SIP-HADIR 4")
     st.caption("Sistem Presensi Biometrik - Cabang Dinas Wilayah 4")
@@ -196,13 +177,11 @@ if st.session_state['user'] is None:
             st.error("NIP atau Password salah!")
     st.stop()
 
-# ----- SIDEBAR PROFIL & APLIKASI -----
 user = st.session_state['user']
 st.sidebar.markdown("### 🏛️ SIP-HADIR 4")
 st.sidebar.markdown(f"👤 **{user['name']}**")
 st.sidebar.caption(f"Hak Akses: **{user['role'].upper()}** | NIP: {user['nip']}")
 
-# Fitur Ganti Password
 with st.sidebar.expander("🔑 Ganti Password"):
     new_pass = st.text_input("Password Baru", type="password")
     confirm_pass = st.text_input("Konfirmasi Password", type="password")
@@ -225,7 +204,7 @@ if st.sidebar.button("Keluar (Logout)"):
 # ==========================================
 
 # ------------------------------------------
-# A. PERAN ASN / GURU (GPS OTOMATIS & KAMERA STABIL)
+# A. PERAN ASN / GURU (KAMERA FIX SELALU MUNCUL)
 # ------------------------------------------
 if user['role'] == 'asn':
     st.title("📌 Presensi Kehadiran ASN")
@@ -252,13 +231,19 @@ if user['role'] == 'asn':
             else:
                 st.error(msg)
 
-    # ALUR 2: Presensi Harian (GPS Otomatis Browser)
+    # ALUR 2: Presensi Harian (GPS & Kamera Berjalan Independen)
     else:
+        st.subheader("📍 Lokasi & Verifikasi Presensi")
+        
         curr_lat = st.query_params.get("lat", None)
         curr_lng = st.query_params.get("lng", None)
         
+        # Inisialisasi Status GPS
+        is_in_radius = False
+        distance = 0.0
+        
         if not curr_lat or not curr_lng:
-            st.info("🔄 Mengambil lokasi GPS... Pastikan izin lokasi (GPS) diizinkan pada browser HP Anda.")
+            st.warning("🔄 Sedang mendeteksi lokasi GPS... Mohon izinkan lokasi pada browser HP Anda.")
             gps_script = """
             <script>
             if (navigator.geolocation) {
@@ -276,19 +261,17 @@ if user['role'] == 'asn':
                     function(error) {
                         console.log("GPS Error: " + error.message);
                     },
-                    { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+                    { enableHighAccuracy: true, timeout: 7000 }
                 );
             }
             </script>
             """
             components.html(gps_script, height=0)
-            
-            if st.button("🔄 Muat Ulang Koordinat GPS"):
+            if st.button("🔄 Ambil Ulang Koordinat GPS"):
                 st.rerun()
         else:
             curr_lat = float(curr_lat)
             curr_lng = float(curr_lng)
-            
             distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
             is_in_radius = distance <= school['radius_meters']
             
@@ -300,10 +283,15 @@ if user['role'] == 'asn':
             else:
                 st.error(f"❌ Lokasi Tidak Valid: Di luar radius ({school['radius_meters']} m).")
 
-            st.write("---")
-            img_scan = st.camera_input("Pindai Wajah Presensi", key="cam_presensi")
-            
-            if img_scan:
+        st.write("---")
+        
+        # KAMERA DILETAKKAN DI LUAR IF/ELSE AGAR SELALU MUNCUL DI LAYAR
+        img_scan = st.camera_input("Pindai Wajah Presensi", key="cam_presensi")
+        
+        if img_scan:
+            if not curr_lat or not curr_lng:
+                st.error("🚫 Gagal Presensi: Lokasi GPS belum terdeteksi! Aktifkan GPS HP Anda dan klik 'Ambil Ulang Koordinat GPS'.")
+            else:
                 scan_encoding, msg = extract_face_features(img_scan)
                 if not scan_encoding:
                     st.error(msg)
@@ -349,14 +337,12 @@ elif user['role'] == 'sekolah':
     st.caption(f"Unit Kerja: **{school['name']}**")
     tab1, tab2, tab3 = st.tabs(["📊 Laporan Kehadiran", "👥 Kelola Guru ASN", "⚙️ GPS Sekolah"])
     
-    # TAB 1: LAPORAN
     with tab1:
         if logs:
             st.dataframe(pd.DataFrame([dict(row) for row in logs]), use_container_width=True)
         else:
             st.info("Belum ada data presensi.")
 
-    # TAB 2: KELOLA GURU
     with tab2:
         c_add, c_list = st.columns([1, 1.2])
         with c_add:
@@ -412,7 +398,6 @@ elif user['role'] == 'sekolah':
                         st.success("Wajah di-reset!")
                         st.rerun()
 
-    # TAB 3: PENGATURAN GPS
     with tab3:
         n_lat = st.number_input("Target Latitude", value=school['target_lat'], format="%.6f")
         n_lng = st.number_input("Target Longitude", value=school['target_lng'], format="%.6f")
@@ -459,14 +444,12 @@ elif user['role'] == 'cabdin':
         "🏫 Tambah Sekolah"
     ])
     
-    # TAB 1: LOG REAL TIME
     with tab_log:
         if logs_all:
             st.dataframe(pd.DataFrame([dict(r) for r in logs_all]), use_container_width=True)
         else:
             st.info("Belum ada log presensi.")
 
-    # TAB 2: EXPORT UNTUK GOOGLE SHEETS
     with tab_export:
         st.markdown("#### 📥 Rekap Presensi (Impor Google Sheets)")
         if logs_all:
@@ -502,12 +485,10 @@ elif user['role'] == 'cabdin':
         else:
             st.info("Data belum tersedia.")
 
-    # TAB 3: KELOLA PENGGUNA
     with tab_user:
         st.write("#### Daftar Pengguna Sistem")
         st.dataframe(pd.DataFrame([dict(u) for u in users_all]), use_container_width=True)
 
-    # TAB 4: TAMBAH SEKOLAH (DENGAN PENANGANAN ERROR DUPLIKASI)
     with tab_school:
         st.write("#### ➕ Tambah Sekolah Baru")
         s_id = st.text_input("ID Sekolah (misal: SCH-02)")
@@ -519,12 +500,11 @@ elif user['role'] == 'cabdin':
         if st.button("Simpan Sekolah Baru", type="primary"):
             if s_id and s_name:
                 conn = get_db()
-                
                 check_school = conn.execute("SELECT id FROM schools WHERE id = ?", (s_id,)).fetchone()
                 check_user = conn.execute("SELECT nip FROM users WHERE nip = ?", (f"ADMIN-{s_id}",)).fetchone()
                 
                 if check_school:
-                    st.error(f"⚠️ ID Sekolah '{s_id}' sudah digunakan! Gunakan ID lain (misal: SCH-02).")
+                    st.error(f"⚠️ ID Sekolah '{s_id}' sudah digunakan!")
                     conn.close()
                 elif check_user:
                     st.error(f"⚠️ User Admin 'ADMIN-{s_id}' sudah ada di sistem.")
