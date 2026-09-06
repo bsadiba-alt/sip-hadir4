@@ -417,7 +417,7 @@ elif user['role'] == 'cabdin':
     
     conn = get_db()
     total_asn = conn.execute("SELECT COUNT(*) FROM users WHERE role='asn'").fetchone()[0]
-    total_hadir = conn.execute("SELECT COUNT(DISTINCT nip) FROM attendance WHERE DATE(timestamp) = DATE('now')").fetchone()[0]
+    total_hadir = conn.execute("SELECT COUNT(DISTINCT nip) FROM attendance WHERE DATE(timestamp, '+8 hours') = DATE('now', '+8 hours')").fetchone()[0]
     
     logs_all = conn.execute('''
         SELECT a.timestamp as Waktu, s.name as Sekolah, u.nip as NIP, u.name as Nama, a.status as Status, a.distance_meters as Jarak_Meter 
