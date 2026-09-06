@@ -6,13 +6,19 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 from datetime import datetime
-from streamlit_js_eval import get_geolocation
+
+# Impor pustaka GPS dengan penanganan error jika belum terinstal di server
+try:
+    from streamlit_js_eval import get_geolocation
+    HAS_GEO_LIB = True
+except ImportError:
+    HAS_GEO_LIB = False
 
 # ==========================================
 # 1. KONFIGURASI HALAMAN & CSS RESPONSIF MOBILE
 # ==========================================
 st.set_page_config(
-    page_title="PRESENSI WIL IV", 
+    page_title="SIP-HADIR 4", 
     layout="wide", 
     page_icon="🔐",
     initial_sidebar_state="expanded"
@@ -151,15 +157,26 @@ def match_faces(encoding1, encoding2, threshold=0.55):
     return distance < threshold, distance
 
 # ==========================================
-# 4. SESI LOG IN & NAVIGASI SIDEBAR
+# 4. SESI LOG IN & AUTO-LOGIN (PERSISTENSI REFRESH)
 # ==========================================
 init_db()
 
 if 'user' not in st.session_state:
     st.session_state['user'] = None
 
+# Alur Auto-Login dari URL Parameter jika Halaman Di-refresh
 if st.session_state['user'] is None:
-    st.title("🏛️ PRESENSI WIL.IV")
+    saved_nip = st.query_params.get("session_nip", None)
+    if saved_nip:
+        conn = get_db()
+        auto_user = conn.execute("SELECT * FROM users WHERE nip = ?", (saved_nip,)).fetchone()
+        conn.close()
+        if auto_user:
+            st.session_state['user'] = dict(auto_user)
+
+# Tampilan Form Login
+if st.session_state['user'] is None:
+    st.title("🏛️ SIP-HADIR 4")
     st.caption("Sistem Presensi Biometrik - Cabang Dinas Wilayah 4")
     
     st.info("Log in menggunakan NIP sebagai Username & Password bawaan.")
@@ -172,13 +189,15 @@ if st.session_state['user'] is None:
         conn.close()
         if user:
             st.session_state['user'] = dict(user)
+            st.query_params["session_nip"] = user['nip']
             st.rerun()
         else:
             st.error("NIP atau Password salah!")
     st.stop()
 
+# Sidebar Profil & Keluar
 user = st.session_state['user']
-st.sidebar.markdown("### 🏛️ PRESENSI WIL.IV")
+st.sidebar.markdown("### 🏛️ SIP-HADIR 4")
 st.sidebar.markdown(f"👤 **{user['name']}**")
 st.sidebar.caption(f"Hak Akses: **{user['role'].upper()}** | NIP: {user['nip']}")
 
@@ -197,6 +216,8 @@ with st.sidebar.expander("🔑 Ganti Password"):
 
 if st.sidebar.button("Keluar (Logout)"):
     st.session_state['user'] = None
+    if "session_nip" in st.query_params:
+        del st.query_params["session_nip"]
     st.rerun()
 
 # ==========================================
@@ -204,7 +225,7 @@ if st.sidebar.button("Keluar (Logout)"):
 # ==========================================
 
 # ------------------------------------------
-# A. PERAN ASN / GURU (DENGAN STREAMLIT-JS-EVAL GPS)
+# A. PERAN ASN / GURU
 # ------------------------------------------
 if user['role'] == 'asn':
     st.title("📌 Presensi Kehadiran ASN")
@@ -214,7 +235,7 @@ if user['role'] == 'asn':
     db_user = conn.execute("SELECT * FROM users WHERE nip = ?", (user['nip'],)).fetchone()
     conn.close()
 
-    # ALUR 1: Registrasi Wajah Perdana
+    # ALUR 1: Registrasi Wajah Perdana[cite: 1]
     if db_user['face_encoding'] is None:
         st.warning("⚠️ Biometrik wajah Anda belum terdaftar. Lakukan pendaftaran awal di bawah ini.")
         img_file = st.camera_input("Ambil Foto Referensi Wajah", key="cam_reg")
@@ -231,38 +252,39 @@ if user['role'] == 'asn':
             else:
                 st.error(msg)
 
-    # ALUR 2: Presensi Harian (GPS Menggunakan streamlit-js-eval)
+    # ALUR 2: Presensi Harian[cite: 1]
     else:
         st.subheader("📍 Lokasi & Verifikasi Presensi")
-        
-        # Pengambilan Lokasi JS Direct
-        location = get_geolocation()
         
         curr_lat = None
         curr_lng = None
         is_in_radius = False
         distance = 0.0
 
-        if location and 'coords' in location:
-            curr_lat = location['coords']['latitude']
-            curr_lng = location['coords']['longitude']
-            
-            distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
-            is_in_radius = distance <= school['radius_meters']
-            
-            st.write(f"🏢 **Sekolah:** {school['name']}")
-            st.write(f"📏 **Jarak Anda:** `{distance:.1f} Meter` dari sekolah")
-            
-            if is_in_radius:
-                st.success("✅ Lokasi Valid: Anda berada di area sekolah.")
+        if HAS_GEO_LIB:
+            location = get_geolocation()
+            if location and 'coords' in location:
+                curr_lat = location['coords']['latitude']
+                curr_lng = location['coords']['longitude']
+                
+                distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
+                is_in_radius = distance <= school['radius_meters']
+                
+                st.write(f"🏢 **Sekolah:** {school['name']}")
+                st.write(f"📏 **Jarak Anda:** `{distance:.1f} Meter` dari sekolah")
+                
+                if is_in_radius:
+                    st.success("✅ Lokasi Valid: Anda berada di area sekolah.")
+                else:
+                    st.error(f"❌ Lokasi Tidak Valid: Di luar radius ({school['radius_meters']} m).")
             else:
-                st.error(f"❌ Lokasi Tidak Valid: Di luar radius ({school['radius_meters']} m).")
+                st.warning("🔄 Mengambil koordinat GPS... Pastikan izin lokasi (GPS) aktif di browser HP Anda.")
         else:
-            st.warning("🔄 Mengambil koordinat GPS... Pastikan lokasi (GPS) HP aktif dan berikan izin pada browser.")
+            st.error("⚠️ Pustaka `streamlit-js-eval` belum terinstal. Tambahkan `streamlit-js-eval` ke file requirements.txt.")
 
         st.write("---")
         
-        # Kamera Tetap Aktif
+        # Widget Kamera Ditampilkan Tanpa Syarat GPS
         img_scan = st.camera_input("Pindai Wajah Presensi", key="cam_presensi")
         
         if img_scan:
