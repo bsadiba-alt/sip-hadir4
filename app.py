@@ -12,7 +12,7 @@ from streamlit_js_eval import get_geolocation
 # 1. KONFIGURASI HALAMAN & CSS RESPONSIF MOBILE
 # ==========================================
 st.set_page_config(
-    page_title="SIP-HADIR 4", 
+    page_title="PRESENSI WIL IV", 
     layout="wide", 
     page_icon="🔐",
     initial_sidebar_state="expanded"
@@ -159,7 +159,7 @@ if 'user' not in st.session_state:
     st.session_state['user'] = None
 
 if st.session_state['user'] is None:
-    st.title("🏛️ SIP-HADIR 4")
+    st.title("🏛️ PRESENSI WIL.IV")
     st.caption("Sistem Presensi Biometrik - Cabang Dinas Wilayah 4")
     
     st.info("Log in menggunakan NIP sebagai Username & Password bawaan.")
@@ -178,7 +178,7 @@ if st.session_state['user'] is None:
     st.stop()
 
 user = st.session_state['user']
-st.sidebar.markdown("### 🏛️ SIP-HADIR 4")
+st.sidebar.markdown("### 🏛️ PRESENSI WIL.IV")
 st.sidebar.markdown(f"👤 **{user['name']}**")
 st.sidebar.caption(f"Hak Akses: **{user['role'].upper()}** | NIP: {user['nip']}")
 
