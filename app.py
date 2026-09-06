@@ -164,7 +164,6 @@ init_db()
 if 'user' not in st.session_state:
     st.session_state['user'] = None
 
-# Alur Auto-Login dari URL Parameter jika Halaman Di-refresh
 if st.session_state['user'] is None:
     saved_nip = st.query_params.get("session_nip", None)
     if saved_nip:
@@ -174,7 +173,6 @@ if st.session_state['user'] is None:
         if auto_user:
             st.session_state['user'] = dict(auto_user)
 
-# Tampilan Form Login
 if st.session_state['user'] is None:
     st.title("🏛️ SIP-HADIR 4")
     st.caption("Sistem Presensi Biometrik - Cabang Dinas Wilayah 4")
@@ -195,7 +193,6 @@ if st.session_state['user'] is None:
             st.error("NIP atau Password salah!")
     st.stop()
 
-# Sidebar Profil & Keluar
 user = st.session_state['user']
 st.sidebar.markdown("### 🏛️ SIP-HADIR 4")
 st.sidebar.markdown(f"👤 **{user['name']}**")
@@ -233,9 +230,17 @@ if user['role'] == 'asn':
     conn = get_db()
     school = conn.execute("SELECT * FROM schools WHERE id = ?", (user['school_id'],)).fetchone()
     db_user = conn.execute("SELECT * FROM users WHERE nip = ?", (user['nip'],)).fetchone()
+    
+    # Cek status presensi hari ini secara eksplisit untuk tampilan awal
+    today_status = conn.execute(
+        "SELECT timestamp FROM attendance WHERE nip = ? AND DATE(timestamp, '+8 hours') = DATE('now', '+8 hours')",
+        (user['nip'],)
+    ).fetchone()
     conn.close()
 
-    # ALUR 1: Registrasi Wajah Perdana[cite: 1]
+    if today_status:
+        st.success(f"✅ Anda telah melakukan presensi hari ini pada jam `{today_status['timestamp']}` WITA.")
+
     if db_user['face_encoding'] is None:
         st.warning("⚠️ Biometrik wajah Anda belum terdaftar. Lakukan pendaftaran awal di bawah ini.")
         img_file = st.camera_input("Ambil Foto Referensi Wajah", key="cam_reg")
@@ -252,7 +257,6 @@ if user['role'] == 'asn':
             else:
                 st.error(msg)
 
-    # ALUR 2: Presensi Harian[cite: 1]
     else:
         st.subheader("📍 Lokasi & Verifikasi Presensi")
         
@@ -280,11 +284,10 @@ if user['role'] == 'asn':
             else:
                 st.warning("🔄 Mengambil koordinat GPS... Pastikan izin lokasi (GPS) aktif di browser HP Anda.")
         else:
-            st.error("⚠️ Pustaka `streamlit-js-eval` belum terinstal. Tambahkan `streamlit-js-eval` ke file requirements.txt.")
+            st.error("⚠️ Pustaka `streamlit-js-eval` belum terinstal.")
 
         st.write("---")
         
-        # Widget Kamera Ditampilkan Tanpa Syarat GPS
         img_scan = st.camera_input("Pindai Wajah Presensi", key="cam_presensi")
         
         if img_scan:
@@ -300,12 +303,24 @@ if user['role'] == 'asn':
 
                     if is_match and is_in_radius:
                         conn = get_db()
-                        conn.execute("INSERT INTO attendance (nip, lat, lng, distance_meters, status) VALUES (?, ?, ?, ?, ?)",
-                                     (user['nip'], curr_lat, curr_lng, distance, 'HADIR'))
-                        conn.commit()
-                        conn.close()
-                        st.balloons()
-                        st.success("🎉 PRESENSI BERHASIL DICATAT!")
+                        
+                        # Validasi ganda sebelum menyimpan data
+                        already_present = conn.execute(
+                            "SELECT COUNT(*) FROM attendance WHERE nip = ? AND DATE(timestamp, '+8 hours') = DATE('now', '+8 hours')",
+                            (user['nip'],)
+                        ).fetchone()[0]
+
+                        if already_present > 0:
+                            conn.close()
+                            st.warning("⚠️ Anda sudah melakukan presensi hari ini! Presensi ganda tidak diperbolehkan.")
+                        else:
+                            conn.execute("INSERT INTO attendance (nip, lat, lng, distance_meters, status) VALUES (?, ?, ?, ?, ?)",
+                                         (user['nip'], curr_lat, curr_lng, distance, 'HADIR'))
+                            conn.commit()
+                            conn.close()
+                            st.balloons()
+                            st.success("🎉 PRESENSI BERHASIL DICATAT!")
+                            st.rerun()
                     else:
                         if not is_match:
                             st.error(f"🚫 Presensi Ditolak: Wajah tidak cocok! (Kemiripan: {dist:.2f})")
