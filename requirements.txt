@@ -1,4 +1,6 @@
-cmake
-build-essential
-libgl1-mesa-glx
-libglib2.0-0
+git init
+git add .
+git commit -m "Upload awal aplikasi presensi PTK Flask"
+git branch -M main
+git remote add origin https://github.com/USERNAME-ANDA/presensi-ptk-flask.git
+git push -u origin main
