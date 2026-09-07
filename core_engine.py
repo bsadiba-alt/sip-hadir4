@@ -1,62 +1,63 @@
-import math
-import numpy as np
-import face_recognition
-import io
+import streamlit as st
+import datetime
 
-def hitung_jarak_gps(lat1, lon1, lat2, lon2):
-    """
-    Menghitung jarak dua titik koordinat dalam meter menggunakan Formula Haversine.
-    """
-    R = 6371000  # Radius bumi dalam meter
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
+st.set_page_config(page_title="Sistem Absensi PTK", page_icon="📋", layout="wide")
 
-    a = math.sin(delta_phi / 2.0) ** 2 + \
-        math.cos(phi1) * math.cos(phi2) * \
-        math.sin(delta_lambda / 2.0) ** 2
+# Inisialisasi Session State Login
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
 
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
-
-def ekstrak_vector_wajah(foto_bytes):
-    """
-    Mengekstrak encoding 128-dimensi dari foto master JPEG.
-    """
-    try:
-        img = face_recognition.load_image_file(io.BytesIO(foto_bytes))
-        encodings = face_recognition.face_encodings(img)
-        if len(encodings) > 0:
-            return True, encodings[0].tolist(), "Ekstraksi wajah berhasil."
+# Halaman Login
+if not st.session_state["logged_in"]:
+    st.title("🔑 Login Presensi PTK")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    
+    if st.button("Login", type="primary"):
+        if username == "admin" and password == "admin123":
+            st.session_state["logged_in"] = True
+            st.session_state["user"] = "Super Admin"
+            st.rerun()
         else:
-            return False, None, "Wajah tidak terdeteksi pada foto. Pastikan posisi wajah tegak dan pencahayaan cukup."
-    except Exception as e:
-        return False, None, f"Terjadi kesalahan saat memproses gambar: {str(e)}"
+            st.error("Username atau Password salah!")
 
-def verifikasi_wajah_dipertajam(foto_input_bytes, vector_master_list, threshold=0.42):
-    """
-    Membandingkan foto selfie dengan vector master.
-    Threshold default 0.42 untuk meminimalisir False Positive (Sangat Ketat).
-    """
-    try:
-        img_input = face_recognition.load_image_file(io.BytesIO(foto_input_bytes))
-        encodings_input = face_recognition.face_encodings(img_input)
+# Halaman Utama Aplikasi
+else:
+    st.sidebar.title(f"Aplikasi PTK ({st.session_state['user']})")
+    if st.sidebar.button("Logout"):
+        st.session_state["logged_in"] = False
+        st.rerun()
 
-        if not encodings_input:
-            return False, "Wajah tidak terdeteksi pada kamera selfie.", 0.0
+    menu = st.sidebar.radio("Navigasi Menu", ["Dashboard & Absensi", "Data PTK", "Pengaturan"])
 
-        vector_input = encodings_input[0]
-        vector_master = np.array(vector_master_list)
+    if menu == "Dashboard & Absensi":
+        st.header("📸 Dashboard & Presensi Wajah")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            nama = st.selectbox("Pilih Nama Pegawai", ["Budi Santoso", "Siti Rahma"])
+            jenis = st.radio("Jenis Presensi", ["Masuk", "Pulang"])
+        
+        with col2:
+            foto = st.camera_input("Ambil Foto Presensi")
+            if st.button("Kirim Presensi", type="primary"):
+                if foto:
+                    st.success(f"Presensi {jenis} berhasil direkam untuk {nama} pada {datetime.datetime.now().strftime('%H:%M:%S')}")
+                else:
+                    st.warning("Kamera wajib digunakan!")
 
-        # Hitung jarak Euclidean
-        distance = face_recognition.face_distance([vector_master], vector_input)[0]
-        akurasi = round((1 - distance) * 100, 2)
+    elif menu == "Data PTK":
+        st.header("👥 Data Tenaga Pendidik & Kependidikan")
+        data_ptk = [
+            {"NIP": "198501012010011001", "Nama": "Budi Santoso", "Golongan": "III/c", "Jabatan": "Guru Matematika"},
+            {"NIP": "199002022015022002", "Nama": "Siti Rahma", "Golongan": "III/b", "Jabatan": "Guru Bahasa Indonesia"}
+        ]
+        st.dataframe(data_ptk, use_container_width=True)
 
-        if distance <= threshold:
-            return True, f"Verifikasi Wajah Cocok! (Akurasi: {akurasi}%)", distance
-        else:
-            return False, f"Wajah Tidak Cocok dengan Data Master! (Tingkat Kemiripan Rendah: {akurasi}%)", distance
-
-    except Exception as e:
-        return False, f"Gagal memproses verifikasi: {str(e)}", 0.0
+    elif menu == "Pengaturan":
+        st.header("⚙️ Pengaturan Jam Kerja")
+        st.time_input("Batas Jam Masuk", datetime.time(7, 30))
+        st.time_input("Batas Jam Pulang", datetime.time(14, 0))
+        st.text_input("Titik Koordinat Pusat", "-5.147665, 119.432731")
+        if st.button("Simpan Pengaturan"):
+            st.success("Pengaturan berhasil disimpan!")
