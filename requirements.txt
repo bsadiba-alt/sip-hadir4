@@ -1,5 +1,4 @@
-streamlit
-numpy
-pandas
-Pillow
-streamlit-js-eval
+cmake
+build-essential
+libgl1-mesa-glx
+libglib2.0-0
