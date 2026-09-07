@@ -1,538 +1,487 @@
-import sqlite3
-import math
-import json
-import numpy as np
-import pandas as pd
 import streamlit as st
-from PIL import Image
+import pandas as pd
+import sqlite3
+import json
+import io
 from datetime import datetime
+from streamlit_js_eval import get_geolocation
+from core_engine import hitung_jarak_gps, ekstrak_vector_wajah, verifikasi_wajah_dipertajam
 
-# Impor pustaka GPS dengan penanganan error jika belum terinstal di server
-try:
-    from streamlit_js_eval import get_geolocation
-    HAS_GEO_LIB = True
-except ImportError:
-    HAS_GEO_LIB = False
-
-# ==========================================
-# 1. KONFIGURASI HALAMAN & CSS RESPONSIF MOBILE
-# ==========================================
+# --- KONFIGURASI HALAMAN ---
 st.set_page_config(
-    page_title="ABSENSI WIL.IV", 
-    layout="wide", 
-    page_icon="🔐",
+    page_title="Sistem Presensi Cabang Dinas",
+    page_icon="🏫",
+    layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.markdown("""
-    <style>
-    @media (max-width: 768px) {
-        .main .block-container {
-            padding-left: 0.8rem !important;
-            padding-right: 0.8rem !important;
-            padding-top: 1rem !important;
-            padding-bottom: 2rem !important;
-        }
-        .stButton > button, .stDownloadButton > button {
-            width: 100% !important;
-            border-radius: 8px !important;
-            height: 3rem !important;
-            font-weight: bold !important;
-            margin-bottom: 0.5rem !important;
-        }
-        [data-testid="stMetricValue"] {
-            font-size: 1.4rem !important;
-        }
-        [data-testid="stCameraInput"] {
-            width: 100% !important;
-        }
-    }
-    .stApp { background-color: #F8F9FA; }
-    div[data-testid="stMetric"] {
-        background-color: #FFFFFF;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        border: 1px solid #E9ECEF;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# ==========================================
-# 2. DATABASE SETUP & INITIALIZATION
-# ==========================================
-DB_FILE = "sip_hadir4.db"
-
+# --- MANAJEMEN DATABASE SQLITE ---
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect("presensi_cabdin.db", check_same_thread=False)
     return conn
 
 def init_db():
     conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS schools (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            target_lat REAL NOT NULL,
-            target_lng REAL NOT NULL,
-            radius_meters REAL DEFAULT 50.0
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            nip TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            password TEXT NOT NULL,
-            role TEXT CHECK(role IN ('cabdin', 'sekolah', 'asn')),
-            school_id TEXT,
-            face_encoding TEXT,
-            FOREIGN KEY (school_id) REFERENCES schools (id)
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS attendance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nip TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            lat REAL NOT NULL,
-            lng REAL NOT NULL,
-            distance_meters REAL NOT NULL,
-            status TEXT NOT NULL,
-            FOREIGN KEY (nip) REFERENCES users (nip)
-        )
-    ''')
-    cursor.execute("SELECT COUNT(*) FROM users")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO schools VALUES ('SCH-01', 'SMKN 1 Wilayah 4', -5.147665, 119.432732, 50.0)")
-        cursor.execute("INSERT INTO users VALUES ('ADMIN-CABDIN', 'Kepala Cabang Dinas', 'ADMIN-CABDIN', 'cabdin', 'SCH-01', NULL)")
-        cursor.execute("INSERT INTO users VALUES ('ADMIN-SMK1', 'Admin SMKN 1', 'ADMIN-SMK1', 'sekolah', 'SCH-01', NULL)")
-        cursor.execute("INSERT INTO users VALUES ('198501012010011001', 'Budi Santoso, S.Pd (Guru)', '198501012010011001', 'asn', 'SCH-01', NULL)")
-        conn.commit()
-    conn.close()
+    c = conn.cursor()
+    # Tabel Akun Admin
+    c.execute('''CREATE TABLE IF NOT EXISTS admin (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                    username TEXT UNIQUE, 
+                    password TEXT, 
+                    nama_sekolah TEXT, 
+                    role TEXT)''')
 
-# ==========================================
-# 3. LOGIKA BIOMETRIK WAJAH & GEO-TAGGING
-# ==========================================
-def calculate_haversine(lat1, lon1, lat2, lon2):
-    R = 6371000.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    delta_phi = math.radians(lat2 - lat1)
-    delta_lambda = math.radians(lon2 - lon1)
-    a = math.sin(delta_phi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2)**2
-    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+    # Tabel Pengaturan Sekolah
+    c.execute('''CREATE TABLE IF NOT EXISTS pengaturan (
+                    nama_sekolah TEXT PRIMARY KEY, 
+                    jam_masuk TEXT, 
+                    jam_pulang TEXT, 
+                    latitude REAL, 
+                    longitude REAL, 
+                    radius_meter REAL)''')
 
-def extract_face_features(image_bytes):
-    try:
-        image_bytes.seek(0)
-        img = Image.open(image_bytes).convert('L')
-        w, h = img.size
-        cx, cy = w // 2, h // 2
-        crop_size = min(w, h) // 2
-        
-        left = max(0, cx - crop_size // 2)
-        top = max(0, cy - crop_size // 2)
-        right = min(w, cx + crop_size // 2)
-        bottom = min(h, cy + crop_size // 2)
-        
-        face_cropped = img.crop((left, top, right, bottom))
-        face_resized = face_cropped.resize((64, 64))
-        
-        vector = np.array(face_resized, dtype=np.float32).flatten()
-        norm = np.linalg.norm(vector)
-        if norm > 0:
-            vector = vector / norm
-            
-        return vector.tolist(), "Success"
-    except Exception as e:
-        return None, f"Gagal memproses gambar: {str(e)}"
+    # Tabel Data Pegawai (PTK)
+    c.execute('''CREATE TABLE IF NOT EXISTS pegawai (
+                    nip TEXT PRIMARY KEY, 
+                    nama TEXT, 
+                    nama_sekolah TEXT, 
+                    pangkat_gol TEXT, 
+                    jabatan TEXT, 
+                    foto_vector TEXT, 
+                    foto_uploaded INTEGER DEFAULT 0)''')
 
-def match_faces(encoding1, encoding2, threshold=0.55):
-    if encoding1 is None or encoding2 is None:
-        return False, 999.0
-    v1 = np.array(encoding1, dtype=np.float32)
-    v2 = np.array(encoding2, dtype=np.float32)
-    distance = float(np.linalg.norm(v1 - v2))
-    return distance < threshold, distance
+    # Tabel Log Presensi
+    c.execute('''CREATE TABLE IF NOT EXISTS presensi (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                    nip TEXT, 
+                    tanggal TEXT, 
+                    jam TEXT, 
+                    status TEXT, 
+                    lat REAL, 
+                    lon REAL, 
+                    keterangan TEXT)''')
 
-# ==========================================
-# 4. SESI LOG IN & AUTO-LOGIN (PERSISTENSI REFRESH)
-# ==========================================
+    # Default Akun Super Admin
+    c.execute("INSERT OR IGNORE INTO admin (username, password, nama_sekolah, role) VALUES ('superadmin', 'admin123', 'CABANG DINAS', 'superadmin')")
+    conn.commit()
+
 init_db()
 
-if 'user' not in st.session_state:
-    st.session_state['user'] = None
+# --- INISIALISASI SESSION STATE ---
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.user_info = {}
 
-if st.session_state['user'] is None:
-    saved_nip = st.query_params.get("session_nip", None)
-    if saved_nip:
-        conn = get_db()
-        auto_user = conn.execute("SELECT * FROM users WHERE nip = ?", (saved_nip,)).fetchone()
-        conn.close()
-        if auto_user:
-            st.session_state['user'] = dict(auto_user)
+# --- NAVIGASI UTAMA APPS ---
+st.sidebar.title("🏫 Presensi Cabdin")
+mode_akses = st.sidebar.radio("Pilih Portal Akses", ["Portal Presensi Mandiri (PTK)", "Login Admin / Manajemen"])
 
-if st.session_state['user'] is None:
-    st.title("🏛️ ABSENSI WIL.IV")
-    st.caption("Sistem Presensi Biometrik - Cabang Dinas Wilayah 4")
-    
-    st.info("Log in menggunakan NIP sebagai Username & Password bawaan.")
-    nip = st.text_input("NIP / Username")
-    password = st.text_input("Password", type="password")
-    
-    if st.button("Masuk Ke Sistem", type="primary"):
-        conn = get_db()
-        user = conn.execute("SELECT * FROM users WHERE nip = ? AND password = ?", (nip, password)).fetchone()
-        conn.close()
-        if user:
-            st.session_state['user'] = dict(user)
-            st.query_params["session_nip"] = user['nip']
-            st.rerun()
+conn = get_db()
+
+# ==============================================================================
+# PORTAL 1: PRESENSI MANDIRI PTK (SELFIE & GPS)
+# ==============================================================================
+if mode_akses == "Portal Presensi Mandiri (PTK)":
+    st.title("📸 Portal Presensi Mandiri PTK")
+    st.caption("Silakan masukkan NIP, izinkan lokasi GPS browser, dan ambil foto selfie untuk presensi.")
+
+    nip_input = st.text_input("Masukkan NIP Anda", placeholder="1985xxxxxxxxxxxxxx")
+
+    if nip_input:
+        c = conn.cursor()
+        c.execute("SELECT nip, nama, nama_sekolah, foto_vector, foto_uploaded FROM pegawai WHERE nip=?", (nip_input.strip(),))
+        pegawai = c.fetchone()
+
+        if not pegawai:
+            st.error("❌ NIP Anda belum terdaftar dalam sistem. Silakan hubungi Admin Sekolah.")
+        elif pegawai[4] == 0 or not pegawai[3]:
+            st.warning("⚠️ Foto master wajah Anda belum diunggah oleh Admin Sekolah. Silakan minta Admin Sekolah mengunggah foto master Anda.")
         else:
-            st.error("NIP atau Password salah!")
-    st.stop()
+            nama_peg, sek_peg = pegawai[1], pegawai[2]
+            vector_master = json.loads(pegawai[3])
 
-user = st.session_state['user']
-st.sidebar.markdown("### 🏛️ ABSENSI WIL.IV")
-st.sidebar.markdown(f"👤 **{user['name']}**")
-st.sidebar.caption(f"Hak Akses: **{user['role'].upper()}** | NIP: {user['nip']}")
+            st.success(f"Dikenali: **{nama_peg}** | Unit Kerja: **{sek_peg}**")
 
-with st.sidebar.expander("🔑 Ganti Password"):
-    new_pass = st.text_input("Password Baru", type="password")
-    confirm_pass = st.text_input("Konfirmasi Password", type="password")
-    if st.button("Simpan Password Baru"):
-        if new_pass and new_pass == confirm_pass:
-            conn = get_db()
-            conn.execute("UPDATE users SET password = ? WHERE nip = ?", (new_pass, user['nip']))
-            conn.commit()
-            conn.close()
-            st.success("Password diperbarui!")
-        else:
-            st.warning("Password tidak cocok!")
+            # 1. Validasi Lokasi GPS Browser
+            st.subheader("📍 1. Deteksi Titik Koordinat GPS")
+            loc = get_geolocation()
 
-if st.sidebar.button("Keluar (Logout)"):
-    st.session_state['user'] = None
-    if "session_nip" in st.query_params:
-        del st.query_params["session_nip"]
-    st.rerun()
-
-# ==========================================
-# 5. MODUL PERAN PENGGUNA
-# ==========================================
-
-# ------------------------------------------
-# A. PERAN ASN / GURU
-# ------------------------------------------
-if user['role'] == 'asn':
-    st.title("📌 Presensi Kehadiran ASN")
-    
-    conn = get_db()
-    school = conn.execute("SELECT * FROM schools WHERE id = ?", (user['school_id'],)).fetchone()
-    db_user = conn.execute("SELECT * FROM users WHERE nip = ?", (user['nip'],)).fetchone()
-    
-    # Cek status presensi hari ini secara eksplisit untuk tampilan awal
-    today_status = conn.execute(
-        "SELECT timestamp FROM attendance WHERE nip = ? AND DATE(timestamp, '+8 hours') = DATE('now', '+8 hours')",
-        (user['nip'],)
-    ).fetchone()
-    conn.close()
-
-    if today_status:
-        st.success(f"✅ Anda telah melakukan presensi hari ini pada jam `{today_status['timestamp']}` WITA.")
-
-    if db_user['face_encoding'] is None:
-        st.warning("⚠️ Biometrik wajah Anda belum terdaftar. Lakukan pendaftaran awal di bawah ini.")
-        img_file = st.camera_input("Ambil Foto Referensi Wajah", key="cam_reg")
-        if img_file:
-            encoding, msg = extract_face_features(img_file)
-            if encoding:
-                conn = get_db()
-                conn.execute("UPDATE users SET face_encoding = ? WHERE nip = ?", (json.dumps(encoding), user['nip']))
-                conn.commit()
-                conn.close()
-                st.success("✅ Pendaftaran wajah berhasil! Silakan lakukan presensi.")
-                st.session_state['user']['face_encoding'] = json.dumps(encoding)
-                st.rerun()
+            if not loc:
+                st.warning("🔄 Sedang mengambil koordinat lokasi... Pastikan GPS HP aktif dan Izin Akses Lokasi pada browser sudah DIKIK 'ALLOW/IZINKAN'.")
             else:
-                st.error(msg)
+                lat_user = loc['coords']['latitude']
+                lon_user = loc['coords']['longitude']
+                st.info(f"Koordinat Anda: Lat `{lat_user:.6f}`, Lon `{lon_user:.6f}`")
+
+                # Ambil data batas lokasi sekolah dari tabel pengaturan
+                df_set = pd.read_sql_query(f"SELECT * FROM pengaturan WHERE nama_sekolah='{sek_peg}'", conn)
+
+                if df_set.empty:
+                    st.error(f"❌ Pengaturan titik koordinat untuk '{sek_peg}' belum diset oleh Super Admin.")
+                else:
+                    lat_sek = df_set.iloc[0]['latitude']
+                    lon_sek = df_set.iloc[0]['longitude']
+                    radius_max = df_set.iloc[0]['radius_meter']
+                    jam_masuk_sek = df_set.iloc[0]['jam_masuk']
+
+                    jarak = hitung_jarak_gps(lat_user, lon_user, lat_sek, lon_sek)
+                    
+                    st.metric(label="Jarak Anda ke Sekolah", value=f"{round(jarak, 1)} Meter", delta=f"Batas Maksimal: {radius_max} Meter")
+
+                    if jarak > radius_max:
+                        st.error(f"❌ Anda berada di luar area sekolah ({round(jarak)}m dari lokasi sekolah). Absen ditolak.")
+                    else:
+                        # 2. Camera Selfie & Verifikasi Wajah
+                        st.subheader("📷 2. Verifikasi Wajah Selfie")
+                        img_camera = st.camera_input("Ambil Foto Selfie Presensi")
+
+                        if img_camera:
+                            with st.spinner("Mengolah & Mencocokkan Vektor Wajah..."):
+                                foto_bytes = img_camera.getvalue()
+                                is_valid, msg, dist = verifikasi_wajah_dipertajam(foto_bytes, vector_master)
+
+                                if not is_valid:
+                                    st.error(f"❌ Verifikasi Wajah Gagal: {msg}")
+                                else:
+                                    st.success(f"✅ {msg}")
+
+                                    now = datetime.now()
+                                    tgl_str = now.strftime("%Y-%m-%d")
+                                    jam_str = now.strftime("%H:%M:%S")
+
+                                    status_absen = "Hadir (Tepat Waktu)"
+                                    if jam_str[:5] > jam_masuk_sek:
+                                        status_absen = "Hadir (Terlambat)"
+
+                                    # Simpan Log Kehadiran
+                                    c.execute("""
+                                        INSERT INTO presensi (nip, tanggal, jam, status, lat, lon, keterangan)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    """, (nip_input.strip(), tgl_str, jam_str, status_absen, lat_user, lon_user, f"Presensi Mandiri via HP (Jarak: {round(jarak)}m)"))
+                                    conn.commit()
+
+                                    st.balloons()
+                                    st.success(f"🎉 Presensi Berhasil Dicatat! Jam: {jam_str} | Status: {status_absen}")
+
+# ==============================================================================
+# PORTAL 2: MANAJEMEN ADMIN (SUPER ADMIN & ADMIN SEKOLAH)
+# ==============================================================================
+else:
+    if not st.session_state.logged_in:
+        st.title("🔒 Login Admin / Manajemen")
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Masuk Ke Sistem")
+
+            if submit:
+                c = conn.cursor()
+                c.execute("SELECT username, nama_sekolah, role FROM admin WHERE username=? AND password=?", (username.strip(), password.strip()))
+                res = c.fetchone()
+                if res:
+                    st.session_state.logged_in = True
+                    st.session_state.user_info = {"username": res[0], "sekolah": res[1], "role": res[2]}
+                    st.success("Login Berhasil!")
+                    st.rerun()
+                else:
+                    st.error("Username atau Password Salah!")
 
     else:
-        st.subheader("📍 Lokasi & Verifikasi Presensi")
-        
-        curr_lat = None
-        curr_lng = None
-        is_in_radius = False
-        distance = 0.0
+        user = st.session_state.user_info
+        st.sidebar.divider()
+        st.sidebar.markdown(f"👤 **{user['username'].upper()}**")
+        st.sidebar.caption(f"Role: **{user['role']}**\nSekolah: **{user['sekolah']}**")
 
-        if HAS_GEO_LIB:
-            location = get_geolocation()
-            if location and 'coords' in location:
-                curr_lat = location['coords']['latitude']
-                curr_lng = location['coords']['longitude']
-                
-                distance = calculate_haversine(curr_lat, curr_lng, school['target_lat'], school['target_lng'])
-                is_in_radius = distance <= school['radius_meters']
-                
-                st.write(f"🏢 **Sekolah:** {school['name']}")
-                st.write(f"📏 **Jarak Anda:** `{distance:.1f} Meter` dari sekolah")
-                
-                if is_in_radius:
-                    st.success("✅ Lokasi Valid: Anda berada di area sekolah.")
-                else:
-                    st.error(f"❌ Lokasi Tidak Valid: Di luar radius ({school['radius_meters']} m).")
+        if st.sidebar.button("🚪 Logout / Keluar"):
+            st.session_state.logged_in = False
+            st.session_state.user_info = {}
+            st.rerun()
+
+        # DYNAMIC MENU BASED ON ROLE
+        menu_items = ["Dashboard", "Rekapitulasi", "Data PTK"]
+        if user['role'] == 'superadmin':
+            menu_items.extend(["Pengaturan", "Upload Surat Cuti/Sakit", "Tambah Akun Admin Sekolah"])
+
+        selected_menu = st.sidebar.selectbox("Menu Navigasi", menu_items)
+
+        # ----------------------------------------------------------------------
+        # MENU: DASHBOARD
+        # ----------------------------------------------------------------------
+        if selected_menu == "Dashboard":
+            st.header("📊 Dashboard Kehadiran Real-Time")
+
+            today = datetime.now().strftime("%Y-%m-%d")
+
+            if user['role'] == 'superadmin':
+                q_ptk = "SELECT nip, nama, nama_sekolah, jabatan FROM pegawai"
             else:
-                st.warning("🔄 Mengambil koordinat GPS... Pastikan izin lokasi (GPS) aktif di browser HP Anda.")
-        else:
-            st.error("⚠️ Pustaka `streamlit-js-eval` belum terinstal.")
+                q_ptk = f"SELECT nip, nama, nama_sekolah, jabatan FROM pegawai WHERE nama_sekolah='{user['sekolah']}'"
 
-        st.write("---")
-        
-        img_scan = st.camera_input("Pindai Wajah Presensi", key="cam_presensi")
-        
-        if img_scan:
-            if curr_lat is None or curr_lng is None:
-                st.error("🚫 Presensi Ditolak: Lokasi GPS belum berhasil terdeteksi oleh perangkat!")
+            df_ptk = pd.read_sql_query(q_ptk, conn)
+            df_pres = pd.read_sql_query(f"SELECT nip, jam, status, keterangan FROM presensi WHERE tanggal='{today}'", conn)
+
+            df_dash = pd.merge(df_ptk, df_pres, on='nip', how='left').fillna({'status': 'Belum Absen', 'jam': '-', 'keterangan': '-'})
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total Pegawai (PTK)", len(df_dash))
+            c2.metric("Hadir Tepat Waktu", len(df_dash[df_dash['status'] == 'Hadir (Tepat Waktu)']))
+            c3.metric("Terlambat / Izin", len(df_dash[df_dash['status'].str.contains('Terlambat|Cuti|Sakit|Izin|Surat Tugas', case=False, na=False)]))
+            c4.metric("Belum Absen", len(df_dash[df_dash['status'] == 'Belum Absen']))
+
+            st.subheader(f"Daftar Status Kehadiran Hari Ini ({today})")
+            st.dataframe(df_dash, use_container_width=True)
+
+        # ----------------------------------------------------------------------
+        # MENU: PENGATURAN (SUPER ADMIN ONLY)
+        # ----------------------------------------------------------------------
+        elif selected_menu == "Pengaturan":
+            st.header("⚙️ Pengaturan Jam Kerja & Koordinat Sekolah (Super Admin)")
+
+            list_sek = pd.read_sql_query("SELECT DISTINCT nama_sekolah FROM admin WHERE role='admin_sekolah'", conn)['nama_sekolah'].tolist()
+            if not list_sek:
+                st.info("Belum ada Admin Sekolah. Buat akun Admin Sekolah terlebih dahulu.")
             else:
-                scan_encoding, msg = extract_face_features(img_scan)
-                if not scan_encoding:
-                    st.error(msg)
-                else:
-                    saved_encoding = json.loads(db_user['face_encoding'])
-                    is_match, dist = match_faces(scan_encoding, saved_encoding, threshold=0.55)
+                sel_sek = st.selectbox("Pilih Sekolah yang Akan Diatur", list_sek)
+                curr_set = pd.read_sql_query(f"SELECT * FROM pengaturan WHERE nama_sekolah='{sel_sek}'", conn)
 
-                    if is_match and is_in_radius:
-                        conn = get_db()
-                        
-                        # Validasi ganda sebelum menyimpan data
-                        already_present = conn.execute(
-                            "SELECT COUNT(*) FROM attendance WHERE nip = ? AND DATE(timestamp, '+8 hours') = DATE('now', '+8 hours')",
-                            (user['nip'],)
-                        ).fetchone()[0]
+                val_jam_m = curr_set.iloc[0]['jam_masuk'] if not curr_set.empty else "07:30"
+                val_jam_p = curr_set.iloc[0]['jam_pulang'] if not curr_set.empty else "16:00"
+                val_lat = float(curr_set.iloc[0]['latitude']) if not curr_set.empty else 0.0
+                val_lon = float(curr_set.iloc[0]['longitude']) if not curr_set.empty else 0.0
+                val_rad = float(curr_set.iloc[0]['radius_meter']) if not curr_set.empty else 100.0
 
-                        if already_present > 0:
-                            conn.close()
-                            st.warning("⚠️ Anda sudah melakukan presensi hari ini! Presensi ganda tidak diperbolehkan.")
-                        else:
-                            conn.execute("INSERT INTO attendance (nip, lat, lng, distance_meters, status) VALUES (?, ?, ?, ?, ?)",
-                                         (user['nip'], curr_lat, curr_lng, distance, 'HADIR'))
-                            conn.commit()
-                            conn.close()
-                            st.balloons()
-                            st.success("🎉 PRESENSI BERHASIL DICATAT!")
-                            st.rerun()
-                    else:
-                        if not is_match:
-                            st.error(f"🚫 Presensi Ditolak: Wajah tidak cocok! (Kemiripan: {dist:.2f})")
-                        if not is_in_radius:
-                            st.error("🚫 Presensi Ditolak: Anda berada di luar area sekolah!")
+                with st.form("form_pengaturan"):
+                    col_w1, col_w2 = st.columns(2)
+                    jam_masuk = col_w1.text_input("Batas Jam Masuk (Format HH:MM)", value=val_jam_m)
+                    jam_pulang = col_w2.text_input("Batas Jam Pulang (Format HH:MM)", value=val_jam_p)
 
-# ------------------------------------------
-# B. PERAN SEKOLAH (ADMIN SEKOLAH)
-# ------------------------------------------
-elif user['role'] == 'sekolah':
-    st.title("🏫 Panel Pengawasan Sekolah")
-    
-    conn = get_db()
-    school = conn.execute("SELECT * FROM schools WHERE id = ?", (user['school_id'],)).fetchone()
-    logs = conn.execute('''
-        SELECT a.timestamp as Waktu, u.nip as NIP, u.name as Nama, a.distance_meters as Jarak_Meter, a.status as Status 
-        FROM attendance a JOIN users u ON a.nip = u.nip 
-        WHERE u.school_id = ? ORDER BY a.timestamp DESC
-    ''', (user['school_id'],)).fetchall()
-    
-    teachers = conn.execute('''
-        SELECT nip as NIP, name as Nama_Lengkap, 
-               CASE WHEN face_encoding IS NOT NULL THEN '✅ Terdaftar' ELSE '❌ Belum' END as Status_Wajah
-        FROM users WHERE school_id = ? AND role = 'asn'
-    ''', (user['school_id'],)).fetchall()
-    conn.close()
+                    col_k1, col_k2, col_k3 = st.columns(3)
+                    lat = col_k1.number_input("Latitude Sekolah", value=val_lat, format="%.6f")
+                    lon = col_k2.number_input("Longitude Sekolah", value=val_lon, format="%.6f")
+                    radius = col_k3.number_input("Radius Akses (Meter)", value=val_rad, min_value=10.0, step=10.0)
 
-    st.caption(f"Unit Kerja: **{school['name']}**")
-    tab1, tab2, tab3 = st.tabs(["📊 Laporan Kehadiran", "👥 Kelola Guru ASN", "⚙️ GPS Sekolah"])
-    
-    with tab1:
-        if logs:
-            st.dataframe(pd.DataFrame([dict(row) for row in logs]), use_container_width=True)
-        else:
-            st.info("Belum ada data presensi.")
-
-    with tab2:
-        c_add, c_list = st.columns([1, 1.2])
-        with c_add:
-            st.markdown("#### ➕ Tambah Guru Baru")
-            st.caption("Password otomatis sama dengan NIP.")
-            new_nip = st.text_input("NIP Baru (18 Digit)", key="new_nip")
-            new_name = st.text_input("Nama Lengkap & Gelar", key="new_name")
-            
-            if st.button("Simpan Data Guru", type="primary"):
-                if new_nip and new_name:
-                    conn = get_db()
-                    if conn.execute("SELECT nip FROM users WHERE nip = ?", (new_nip,)).fetchone():
-                        st.error("⚠️ NIP sudah terdaftar!")
-                        conn.close()
-                    else:
-                        conn.execute("INSERT INTO users VALUES (?, ?, ?, 'asn', ?, NULL)",
-                                     (new_nip, new_name, new_nip, user['school_id']))
+                    if st.form_submit_button("Simpan Pengaturan"):
+                        c = conn.cursor()
+                        c.execute("""
+                            INSERT OR REPLACE INTO pengaturan (nama_sekolah, jam_masuk, jam_pulang, latitude, longitude, radius_meter)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (sel_sek, jam_masuk.strip(), jam_pulang.strip(), lat, lon, radius))
                         conn.commit()
-                        conn.close()
-                        st.success(f"Guru {new_name} berhasil ditambahkan!")
-                        st.rerun()
-                else:
-                    st.warning("Lengkapi NIP dan Nama!")
-                    
-        with c_list:
-            st.markdown("#### 👥 Daftar Guru Terdaftar")
-            if teachers:
-                st.dataframe(pd.DataFrame([dict(t) for t in teachers]), use_container_width=True)
-                sel_nip = st.selectbox("Pilih NIP Guru", [t['NIP'] for t in teachers])
-                
-                cr, cd, cf = st.columns(3)
-                with cr:
-                    if st.button("Reset Password"):
-                        conn = get_db()
-                        conn.execute("UPDATE users SET password = nip WHERE nip = ?", (sel_nip,))
-                        conn.commit()
-                        conn.close()
-                        st.success("Password di-reset ke NIP!")
-                with cd:
-                    if st.button("Hapus Guru"):
-                        conn = get_db()
-                        conn.execute("DELETE FROM users WHERE nip = ?", (sel_nip,))
-                        conn.commit()
-                        conn.close()
-                        st.warning("Data guru dihapus!")
-                        st.rerun()
-                with cf:
-                    if st.button("🔄 Reset Wajah"):
-                        conn = get_db()
-                        conn.execute("UPDATE users SET face_encoding = NULL WHERE nip = ?", (sel_nip,))
-                        conn.commit()
-                        conn.close()
-                        st.success("Wajah di-reset!")
-                        st.rerun()
+                        st.success(f"Pengaturan untuk {sel_sek} berhasil disimpan!")
 
-    with tab3:
-        n_lat = st.number_input("Target Latitude", value=school['target_lat'], format="%.6f")
-        n_lng = st.number_input("Target Longitude", value=school['target_lng'], format="%.6f")
-        n_rad = st.number_input("Radius Toleransi (Meter)", value=school['radius_meters'])
-        if st.button("Simpan Koordinat GPS"):
-            conn = get_db()
-            conn.execute("UPDATE schools SET target_lat=?, target_lng=?, radius_meters=? WHERE id=?",
-                         (n_lat, n_lng, n_rad, school['id']))
-            conn.commit()
-            conn.close()
-            st.success("Koordinat diperbarui!")
+        # ----------------------------------------------------------------------
+        # MENU: REKAPITULASI
+        # ----------------------------------------------------------------------
+        elif selected_menu == "Rekapitulasi":
+            st.header("📈 Rekapitulasi Presensi Pegawai")
 
-# ------------------------------------------
-# C. PERAN CABANG DINAS (SUPER ADMIN)
-# ------------------------------------------
-elif user['role'] == 'cabdin':
-    st.title("🏛️ Executive Dashboard - Wilayah 4")
-    
-    conn = get_db()
-    total_asn = conn.execute("SELECT COUNT(*) FROM users WHERE role='asn'").fetchone()[0]
-    total_hadir = conn.execute("SELECT COUNT(DISTINCT nip) FROM attendance WHERE DATE(timestamp, '+8 hours') = DATE('now', '+8 hours')").fetchone()[0]
-    
-    logs_all = conn.execute('''
-        SELECT a.timestamp as Waktu, s.name as Sekolah, u.nip as NIP, u.name as Nama, a.status as Status, a.distance_meters as Jarak_Meter 
-        FROM attendance a 
-        JOIN users u ON a.nip = u.nip 
-        JOIN schools s ON u.school_id = s.id 
-        ORDER BY a.timestamp DESC
-    ''').fetchall()
-    
-    users_all = conn.execute("SELECT u.nip as NIP, u.name as Nama, u.role as Peran, s.name as Sekolah FROM users u LEFT JOIN schools s ON u.school_id = s.id").fetchall()
-    conn.close()
+            col_r1, col_r2 = st.columns(2)
+            bln_opt = [f"{i:02d}" for i in range(1, 13)]
+            sel_bln = col_r1.selectbox("Pilih Bulan", bln_opt, index=datetime.now().month - 1)
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Total ASN", f"{total_asn} Orang")
-    m2.metric("Hadir Hari Ini", f"{total_hadir} Orang")
-    m3.metric("Tingkat Kehadiran", f"{(total_hadir/total_asn*100) if total_asn > 0 else 0:.1f}%")
+            if user['role'] == 'superadmin':
+                sek_opts = ["Semua Sekolah"] + pd.read_sql_query("SELECT DISTINCT nama_sekolah FROM pegawai", conn)['nama_sekolah'].tolist()
+                sel_sek_rekap = col_r2.selectbox("Filter Sekolah", sek_opts)
+            else:
+                sel_sek_rekap = user['sekolah']
 
-    st.write("---")
-    tab_log, tab_export, tab_user, tab_school = st.tabs([
-        "📑 Log Real-Time", 
-        "📥 Export Google Sheets", 
-        "👥 Kelola Pengguna", 
-        "🏫 Tambah Sekolah"
-    ])
-    
-    with tab_log:
-        if logs_all:
-            st.dataframe(pd.DataFrame([dict(r) for r in logs_all]), use_container_width=True)
-        else:
-            st.info("Belum ada log presensi.")
+            query_rekap = f"""
+                SELECT p.tanggal, p.jam, pg.nama_sekolah, pg.nip, pg.nama, pg.pangkat_gol, pg.jabatan, p.status, p.keterangan
+                FROM presensi p
+                JOIN pegawai pg ON p.nip = pg.nip
+                WHERE strftime('%m', p.tanggal) = '{sel_bln}'
+            """
+            if sel_sek_rekap != "Semua Sekolah":
+                query_rekap += f" AND pg.nama_sekolah = '{sel_sek_rekap}'"
 
-    with tab_export:
-        st.markdown("#### 📥 Rekap Presensi (Impor Google Sheets)")
-        if logs_all:
-            df_export = pd.DataFrame([dict(r) for r in logs_all])
-            df_export['Waktu'] = pd.to_datetime(df_export['Waktu'])
-            
-            rekap_type = st.radio("Pilih Filter Laporan:", ["Semua Data", "Harian", "Rentang Tanggal (Mingguan/Bulanan)"], horizontal=True)
-            filtered_df = df_export.copy()
-            
-            if rekap_type == "Harian":
-                tgl = st.date_input("Tanggal", value=datetime.today())
-                filtered_df = df_export[df_export['Waktu'].dt.date == tgl]
-            elif rekap_type == "Rentang Tanggal (Mingguan/Bulanan)":
-                col_t1, col_t2 = st.columns(2)
-                with col_t1:
-                    tgl_m = st.date_input("Mulai", value=datetime.today())
-                with col_t2:
-                    tgl_s = st.date_input("Sampai", value=datetime.today())
-                filtered_df = df_export[(df_export['Waktu'].dt.date >= tgl_m) & (df_export['Waktu'].dt.date <= tgl_s)]
+            df_rekap = pd.read_sql_query(query_rekap, conn)
+            st.dataframe(df_rekap, use_container_width=True)
 
-            filtered_df['Waktu'] = filtered_df['Waktu'].dt.strftime('%Y-%m-%d %H:%M:%S')
-            st.write(f"📊 Total Data Terfilter: `{len(filtered_df)}` baris.")
-            st.dataframe(filtered_df, use_container_width=True)
-            
-            csv_bytes = filtered_df.to_csv(index=False).encode('utf-8')
+            # Tombol Unduh Excel
+            buffer_excel = io.BytesIO()
+            with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
+                df_rekap.to_excel(writer, index=False, sheet_name='Rekap_Presensi')
+
             st.download_button(
-                label="🟢 Download File CSV (Siap Impor ke Google Sheets)",
-                data=csv_bytes,
-                file_name=f"rekap_presensi_wil4_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                type="primary"
+                label="📥 Unduh Rekapitulasi Format Excel (.xlsx)",
+                data=buffer_excel.getvalue(),
+                file_name=f"Rekap_Presensi_{sel_sek_rekap}_Bulan_{sel_bln}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        else:
-            st.info("Data belum tersedia.")
 
-    with tab_user:
-        st.write("#### Daftar Pengguna Sistem")
-        st.dataframe(pd.DataFrame([dict(u) for u in users_all]), use_container_width=True)
+        # ----------------------------------------------------------------------
+        # MENU: DATA PTK
+        # ----------------------------------------------------------------------
+        elif selected_menu == "Data PTK":
+            st.header("👥 Kelola Data Tenaga Pendidik & Kependidikan")
 
-    with tab_school:
-        st.write("#### ➕ Tambah Sekolah Baru")
-        s_id = st.text_input("ID Sekolah (misal: SCH-02)")
-        s_name = st.text_input("Nama Sekolah (misal: SMAN 1 Wajo)")
-        s_lat = st.number_input("Latitude", value=-4.0, format="%.6f")
-        s_lng = st.number_input("Longitude", value=120.0, format="%.6f")
-        s_rad = st.number_input("Radius (Meter)", value=50.0)
-        
-        if st.button("Simpan Sekolah Baru", type="primary"):
-            if s_id and s_name:
-                conn = get_db()
-                check_school = conn.execute("SELECT id FROM schools WHERE id = ?", (s_id,)).fetchone()
-                check_user = conn.execute("SELECT nip FROM users WHERE nip = ?", (f"ADMIN-{s_id}",)).fetchone()
-                
-                if check_school:
-                    st.error(f"⚠️ ID Sekolah '{s_id}' sudah digunakan!")
-                    conn.close()
-                elif check_user:
-                    st.error(f"⚠️ User Admin 'ADMIN-{s_id}' sudah ada di sistem.")
-                    conn.close()
-                else:
-                    try:
-                        conn.execute("INSERT INTO schools VALUES (?, ?, ?, ?, ?)", (s_id, s_name, s_lat, s_lng, s_rad))
-                        conn.execute("INSERT INTO users VALUES (?, ?, ?, 'sekolah', ?, NULL)", (f"ADMIN-{s_id}", f"Admin {s_name}", f"ADMIN-{s_id}", s_id))
-                        conn.commit()
-                        st.success(f"Sekolah {s_name} berhasil ditambahkan!")
-                        st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("⚠️ Gagal menyimpan: Terjadi bentrokan data di database.")
-                    finally:
-                        conn.close()
+            # Isolasi Data PTK berdasarkan Role
+            if user['role'] == 'superadmin':
+                df_ptk = pd.read_sql_query("SELECT nip, nama, nama_sekolah, pangkat_gol, jabatan, foto_uploaded FROM pegawai", conn)
             else:
-                st.warning("⚠️ ID Sekolah dan Nama Sekolah wajib diisi!")
+                df_ptk = pd.read_sql_query(f"SELECT nip, nama, nama_sekolah, pangkat_gol, jabatan, foto_uploaded FROM pegawai WHERE nama_sekolah='{user['sekolah']}'", conn)
+
+            st.dataframe(df_ptk, use_container_width=True)
+
+            tab_tambah, tab_excel, tab_foto = st.tabs(["➕ Tambah/Edit Manual", "📁 Impor via Excel", "📸 Upload Foto Wajah Master"])
+
+            # TAB 1: TAMBAH / EDIT MANUAL
+            with tab_tambah:
+                with st.form("form_ptk_manual"):
+                    f_nip = st.text_input("NIP Pegawai")
+                    f_nama = st.text_input("Nama Lengkap")
+                    f_sek = st.text_input("Nama Sekolah", value=user['sekolah'] if user['role'] != 'superadmin' else "")
+                    f_gol = st.text_input("Pangkat / Golongan")
+                    f_jab = st.text_input("Jabatan")
+
+                    if st.form_submit_button("Simpan Data Pegawai"):
+                        c = conn.cursor()
+                        c.execute("""
+                            INSERT OR REPLACE INTO pegawai (nip, nama, nama_sekolah, pangkat_gol, jabatan)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (f_nip.strip(), f_nama.strip(), f_sek.strip(), f_gol.strip(), f_jab.strip()))
+                        conn.commit()
+                        st.success("Data Pegawai berhasil disimpan!")
+                        st.rerun()
+
+            # TAB 2: IMPOR EXCEL
+            with tab_excel:
+                st.write("Unduh contoh template excel terlebih dahulu untuk menyesuaikan format kolom.")
+                
+                # Sample Template Excel Download
+                df_tpl = pd.DataFrame(columns=["nip", "nama", "nama_sekolah", "pangkat_gol", "jabatan"])
+                tpl_buffer = io.BytesIO()
+                with pd.ExcelWriter(tpl_buffer, engine='openpyxl') as writer:
+                    df_tpl.to_excel(writer, index=False)
+
+                st.download_button("📄 Unduh Template Excel Contoh", tpl_buffer.getvalue(), "Template_Data_PTK.xlsx")
+
+                up_excel = st.file_uploader("Unggah File Excel PTK", type=["xlsx"])
+                if up_excel:
+                    df_upload = pd.read_excel(up_excel)
+                    if user['role'] != 'superadmin':
+                        df_upload['nama_sekolah'] = user['sekolah']
+
+                    c = conn.cursor()
+                    for _, r in df_upload.iterrows():
+                        c.execute("""
+                            INSERT OR REPLACE INTO pegawai (nip, nama, nama_sekolah, pangkat_gol, jabatan)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (str(r['nip']).strip(), str(r['nama']).strip(), str(r['nama_sekolah']).strip(), str(r['pangkat_gol']).strip(), str(r['jabatan']).strip()))
+                    conn.commit()
+                    st.success("Impor data dari Excel berhasil!")
+                    st.rerun()
+
+            # TAB 3: UPLOAD FOTO WAJAH MASTER
+            with tab_foto:
+                st.write("Pilih pegawai untuk mengunggah foto master (Format JPEG/JPG). Foto ini akan digunakan sebagai pembanding saat presensi.")
+                
+                if df_ptk.empty:
+                    st.warning("Belum ada data pegawai.")
+                else:
+                    sel_nip = st.selectbox("Pilih NIP Pegawai", df_ptk['nip'].tolist())
+                    peg_info = df_ptk[df_ptk['nip'] == sel_nip].iloc[0]
+
+                    is_uploaded = peg_info['foto_uploaded']
+                    bisa_upload = False
+
+                    if user['role'] == 'superadmin':
+                        bisa_upload = True
+                        if is_uploaded == 1:
+                            st.info("ℹ️ Mode Super Admin: Anda memiliki wewenang untuk mengganti foto master ini.")
+                    elif is_uploaded == 0:
+                        bisa_upload = True
+                    else:
+                        st.error("🔒 Foto master sudah diunggah sebelumnya. Admin Sekolah hanya dapat mengunggah foto 1 KALI. Hubungi Super Admin jika ingin mengganti foto.")
+
+                    if bisa_upload:
+                        file_jpg = st.file_uploader("Upload Foto Pasfoto JPEG Wajah", type=["jpg", "jpeg"])
+                        if file_jpg:
+                            bytes_img = file_jpg.read()
+                            ok, vector, msg_vector = ekstrak_vector_wajah(bytes_img)
+
+                            if ok:
+                                c = conn.cursor()
+                                vec_json = json.dumps(vector)
+                                c.execute("UPDATE pegawai SET foto_vector=?, foto_uploaded=1 WHERE nip=?", (vec_json, sel_nip))
+                                conn.commit()
+                                st.success("✅ Foto Master & Vektor Wajah Berhasil Disimpan!")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {msg_vector}")
+
+        # ----------------------------------------------------------------------
+        # MENU: UPLOAD SURAT CUTI/SAKIT (SUPER ADMIN ONLY)
+        # ----------------------------------------------------------------------
+        elif selected_menu == "Upload Surat Cuti/Sakit":
+            st.header("📄 Input Surat Cuti / Sakit / Tugas (Super Admin)")
+
+            df_all_ptk = pd.read_sql_query("SELECT nip, nama, nama_sekolah FROM pegawai", conn)
+            dict_ptk = {f"{r['nip']} - {r['nama']} ({r['nama_sekolah']})": r['nip'] for _, r in df_all_ptk.iterrows()}
+
+            if not dict_ptk:
+                st.warning("Data pegawai masih kosong.")
+            else:
+                sel_ptk_label = st.selectbox("Pilih Pegawai", list(dict_ptk.keys()))
+                jns_surat = st.selectbox("Jenis Keterangan Presensi", ["Cuti", "Sakit", "Surat Tugas", "Izin"])
+
+                col_dt1, col_dt2 = st.columns(2)
+                tgl_m = col_dt1.date_input("Tanggal Mulai")
+                tgl_s = col_dt2.date_input("Tanggal Selesai")
+
+                file_surat = st.file_uploader("Unggah File Bukti Surat (PDF/JPG)", type=["pdf", "jpg", "jpeg", "png"])
+
+                if st.button("Proses Input Surat Keterangan"):
+                    if file_surat:
+                        nip_target = dict_ptk[sel_ptk_label]
+                        c = conn.cursor()
+                        rng = pd.date_range(tgl_m, tgl_s)
+
+                        for d in rng:
+                            d_str = d.strftime("%Y-%m-%d")
+                            c.execute("""
+                                INSERT OR REPLACE INTO presensi (nip, tanggal, jam, status, lat, lon, keterangan)
+                                VALUES (?, ?, '-', ?, 0.0, 0.0, ?)
+                            """, (nip_target, d_str, jns_surat, f"Disetujui SuperAdmin: File {file_surat.name}"))
+                        conn.commit()
+                        st.success(f"Keterangan {jns_surat} berhasil dicatat dari {tgl_m} hingga {tgl_s}.")
+
+        # ----------------------------------------------------------------------
+        # MENU: TAMBAH AKUN ADMIN SEKOLAH (SUPER ADMIN ONLY)
+        # ----------------------------------------------------------------------
+        elif selected_menu == "Tambah Akun Admin Sekolah":
+            st.header("🔐 Kelola Akun Admin Sekolah (Super Admin)")
+
+            with st.form("form_add_admin"):
+                st.subheader("Tambah Akun Admin Sekolah Baru")
+                n_sek = st.text_input("Nama Sekolah Lengkap (Contoh: SMAN 1 MAKASSAR)")
+                u_admin = st.text_input("Username Admin Sekolah")
+                p_admin = st.text_input("Password Admin", type="password")
+
+                if st.form_submit_button("Buat Akun Admin"):
+                    try:
+                        c = conn.cursor()
+                        c.execute("INSERT INTO admin (username, password, nama_sekolah, role) VALUES (?, ?, ?, 'admin_sekolah')",
+                                  (u_admin.strip(), p_admin.strip(), n_sek.strip()))
+                        conn.commit()
+                        st.success(f"Akun Admin Sekolah untuk {n_sek} Berhasil Dibuat!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Gagal menambah akun admin: {e}")
+
+            st.divider()
+            st.subheader("Daftar Akun Admin Sekolah & Reset Password")
+            df_adm = pd.read_sql_query("SELECT id, username, nama_sekolah FROM admin WHERE role='admin_sekolah'", conn)
+            st.dataframe(df_adm, use_container_width=True)
+
+            if not df_adm.empty:
+                st.subheader("🔑 Reset Password Admin Sekolah")
+                usr_reset = st.selectbox("Pilih User Admin Sekolah", df_adm['username'].tolist())
+                pass_baru = st.text_input("Password Baru", type="password")
+
+                if st.button("Reset Password Admin"):
+                    if pass_baru:
+                        c = conn.cursor()
+                        c.execute("UPDATE admin SET password=? WHERE username=?", (pass_baru.strip(), usr_reset))
+                        conn.commit()
+                        st.success(f"Password akun admin '{usr_reset}' telah berhasil diperbarui!")
