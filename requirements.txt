@@ -4,3 +4,4 @@ git commit -m "Upload awal aplikasi presensi PTK Flask"
 git branch -M main
 git remote add origin https://github.com/USERNAME-ANDA/presensi-ptk-flask.git
 git push -u origin main
+streamlit>=1.28.0
