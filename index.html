@@ -1,0 +1,26 @@
+// Menggantikan google.script.run.prosesLogin(u, p)
+function handleLogin() {
+    showLoading();
+    const u = document.getElementById('loginUser').value;
+    const p = document.getElementById('loginPass').value;
+
+    fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: u, password: p })
+    })
+    .then(response => response.json())
+    .then(res => {
+        hideLoading();
+        if(res.status) {
+            currentUser = { role: res.role, school: res.school };
+            setupUI();
+        } else {
+            alert(res.message);
+        }
+    })
+    .catch(err => {
+        hideLoading();
+        alert("Gagal terhubung ke server Python");
+    });
+}
